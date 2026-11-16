@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, LoaderCircle, Printer } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
@@ -43,82 +43,118 @@ export function DocumentPreview({ record, onClose }: Props) {
   const data = trpc.documentFormat.get.useQuery(undefined, { retry: false });
   const doc = record.document;
   const isChallan = doc.kind === "delivery_challan";
+  const isInvoice = doc.kind === "invoice";
   const title = isChallan
     ? "Delivery challan"
     : doc.kind === "quotation"
       ? "Quotation preview"
       : "Invoice preview";
 
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  async function createPdfUrl() {
+    const format = data.data ?? (await utils.documentFormat.get.fetch());
+    const [letterhead, logo] = await Promise.all([
+      format.format.letterheadKey
+        ? utils.documentFormat.letterheadBytes.fetch()
+        : Promise.resolve({ base64: null }),
+      format.company.logoKey
+        ? utils.documentFormat.logoBytes.fetch()
+        : Promise.resolve({ base64: null }),
+    ]);
+    const out: BillFlowOutput = {
+      kind: doc.kind,
+      number: doc.number,
+      date: doc.issueDate ?? doc.challanDate,
+      dueDate: doc.dueDate,
+      status: doc.status,
+      subtotal: Number(doc.subtotal ?? 0),
+      taxTotal: Number(doc.taxTotal ?? 0),
+      discount: Number(doc.discount ?? 0),
+      total: Number(doc.total ?? 0),
+      amountPaid: Number(doc.amountPaid ?? 0),
+      notes: doc.notes,
+      placeOfDelivery: doc.placeOfDelivery,
+      dispatchMode: doc.dispatchMode,
+      transporter: doc.transporter,
+      vehicleNo: doc.vehicleNo,
+      ewayBillNo: doc.ewayBillNo,
+      customer: record.customer,
+      company: format.company,
+      items: (record.items ?? []).map((item: any) => ({
+        ...item,
+        quantity: Number(item.quantity),
+        rate: Number(item.rate ?? 0),
+        taxPercent: Number(item.taxPercent ?? 0),
+        total: Number(item.total ?? 0),
+      })),
+      reservedTopMm: format.format.reservedTopMm,
+      reservedBottomMm: format.format.reservedBottomMm,
+      letterheadBase64: letterhead.base64,
+      logoBase64: logo.base64,
+    };
+    const pdf = await buildBillFlowPdf(out);
+    const blob = new Blob([pdf.slice().buffer as ArrayBuffer], {
+      type: "application/pdf",
+    });
+    return URL.createObjectURL(blob);
+  }
+
+  useEffect(() => {
+    if (!data.data) return;
+    let cancelled = false;
+    let generatedUrl: string | null = null;
+    void createPdfUrl()
+      .then(url => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        generatedUrl = url;
+        setPreviewUrl(url);
+      })
+      .catch(error => {
+        if (!cancelled)
+          toast.error(
+            error instanceof Error ? error.message : "Could not create the PDF."
+          );
+      });
+    return () => {
+      cancelled = true;
+      if (generatedUrl) URL.revokeObjectURL(generatedUrl);
+      setPreviewUrl(null);
+    };
+  }, [data.data, doc.id]);
+
   async function makePdf(openForPrint: boolean) {
+    let url: string | null = null;
     try {
       setBusy(openForPrint ? "print" : "download");
-      const format = data.data ?? (await utils.documentFormat.get.fetch());
-      const [letterhead, logo] = await Promise.all([
-        format.format.letterheadKey
-          ? utils.documentFormat.letterheadBytes.fetch()
-          : Promise.resolve({ base64: null }),
-        format.company.logoKey
-          ? utils.documentFormat.logoBytes.fetch()
-          : Promise.resolve({ base64: null }),
-      ]);
-      const out: BillFlowOutput = {
-        kind: doc.kind,
-        number: doc.number,
-        date: doc.issueDate ?? doc.challanDate,
-        dueDate: doc.dueDate,
-        status: doc.status,
-        subtotal: Number(doc.subtotal ?? 0),
-        taxTotal: Number(doc.taxTotal ?? 0),
-        discount: Number(doc.discount ?? 0),
-        total: Number(doc.total ?? 0),
-        amountPaid: Number(doc.amountPaid ?? 0),
-        notes: doc.notes,
-        placeOfDelivery: doc.placeOfDelivery,
-        dispatchMode: doc.dispatchMode,
-        transporter: doc.transporter,
-        vehicleNo: doc.vehicleNo,
-        ewayBillNo: doc.ewayBillNo,
-        customer: record.customer,
-        company: format.company,
-        items: (record.items ?? []).map((item: any) => ({
-          ...item,
-          quantity: Number(item.quantity),
-          rate: Number(item.rate ?? 0),
-          taxPercent: Number(item.taxPercent ?? 0),
-          total: Number(item.total ?? 0),
-        })),
-        reservedTopMm: format.format.reservedTopMm,
-        reservedBottomMm: format.format.reservedBottomMm,
-        letterheadBase64: letterhead.base64,
-        logoBase64: logo.base64,
-      };
-      const pdf = await buildBillFlowPdf(out);
-      const blob = new Blob([pdf.slice().buffer as ArrayBuffer], {
-        type: "application/pdf",
-      });
-      const url = URL.createObjectURL(blob);
+      const generatedUrl = await createPdfUrl();
+      url = generatedUrl;
       if (openForPrint) {
         const tab = window.open("about:blank", "_blank");
         if (!tab) {
           toast.error("Allow pop-ups to open this PDF for printing.");
-          URL.revokeObjectURL(url);
+          URL.revokeObjectURL(generatedUrl);
           return;
         }
         tab.opener = null;
-        tab.location.href = url;
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        tab.location.href = generatedUrl;
+        window.setTimeout(() => URL.revokeObjectURL(generatedUrl), 60_000);
       } else {
         const link = document.createElement("a");
-        link.href = url;
+        link.href = generatedUrl;
         link.download = `${doc.number}.pdf`;
         link.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        window.setTimeout(() => URL.revokeObjectURL(generatedUrl), 10_000);
       }
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not create the PDF."
       );
     } finally {
+      if (url) window.setTimeout(() => URL.revokeObjectURL(url!), 60_000);
       setBusy(null);
     }
   }
@@ -131,7 +167,17 @@ export function DocumentPreview({ record, onClose }: Props) {
       wide
     >
       <div className="document-preview-content">
-        <div className="document-preview-paper">
+        <div
+          className={`document-preview-paper${isInvoice ? " invoice-preview" : ""}${previewUrl ? " pdf-backed" : ""}`}
+        >
+          {previewUrl && (
+            <iframe
+              className="document-preview-pdf-frame"
+              src={previewUrl}
+              title={`${doc.number} PDF preview`}
+            />
+          )}
+          {isInvoice && <h1 className="invoice-preview-title">TAX INVOICE</h1>}
           <div className="document-preview-brand">
             {data.data?.company.logoUrl && (
               <img src={data.data.company.logoUrl} alt="Company logo" />
@@ -163,9 +209,9 @@ export function DocumentPreview({ record, onClose }: Props) {
               <b>{doc.number}</b>
             </div>
           </div>
-          <div className="document-preview-meta">
+          <div className={`document-preview-meta${isInvoice ? " invoice-preview-parties" : ""}`}>
             <div>
-              <small>{isChallan ? "DELIVER TO" : "BILL TO"}</small>
+              <small>{isChallan ? "DELIVER TO" : "BILL TO / DELIVER TO"}</small>
               <b>{record.customer?.name ?? "—"}</b>
               <span>{record.customer?.address ?? ""}</span>
               <span>{record.customer?.phone ?? ""}</span>
@@ -176,6 +222,19 @@ export function DocumentPreview({ record, onClose }: Props) {
                   : ""}
               </span>
             </div>
+            {isInvoice && (
+              <div>
+                <small>DETAIL OF CONSIGNEE (SHIPPED TO)</small>
+                <b>{record.customer?.name ?? "—"}</b>
+                <span>{record.customer?.address ?? ""}</span>
+                <span>{record.customer?.phone ?? ""}</span>
+                <span>
+                  {record.customer?.taxId
+                    ? `GSTIN: ${record.customer.taxId}`
+                    : ""}
+                </span>
+              </div>
+            )}
             <div>
               <small>{isChallan ? "CHALLAN DATE" : "ISSUE DATE"}</small>
               <b>{dateLabel(doc.issueDate ?? doc.challanDate)}</b>
@@ -205,6 +264,18 @@ export function DocumentPreview({ record, onClose }: Props) {
                       <th className="right">RATE</th>
                       <th className="right">AMOUNT</th>
                     </>
+                  ) : isInvoice ? (
+                    <>
+                      <th>NO</th>
+                      <th>ITEM NAME</th>
+                      <th>HSN CODE</th>
+                      <th>QTY (UNIT)</th>
+                      <th className="right">RATE</th>
+                      <th className="right">AMOUNT</th>
+                      <th className="right">GST %</th>
+                      <th className="right">GST AMOUNT</th>
+                      <th className="right">TOTAL</th>
+                    </>
                   ) : (
                     <>
                       <th>DESCRIPTION</th>
@@ -231,6 +302,41 @@ export function DocumentPreview({ record, onClose }: Props) {
                           {money(
                             item.total ??
                               Number(item.quantity) * Number(item.rate ?? 0),
+                            data.data?.company.currency
+                          )}
+                        </td>
+                      </>
+                    ) : isInvoice ? (
+                      <>
+                        <td>{(record.items ?? []).indexOf(item) + 1}.</td>
+                        <td>{item.name}</td>
+                        <td>{item.hsn || "—"}</td>
+                        <td>
+                          {Number(item.quantity)} {item.unit || ""}
+                        </td>
+                        <td className="right">
+                          {money(item.rate, data.data?.company.currency)}
+                        </td>
+                        <td className="right">
+                          {money(
+                            Number(item.quantity) * Number(item.rate ?? 0),
+                            data.data?.company.currency
+                          )}
+                        </td>
+                        <td className="right">{Number(item.taxPercent ?? 0).toFixed(2)}</td>
+                        <td className="right">
+                          {money(
+                            Number(item.quantity) *
+                              Number(item.rate ?? 0) *
+                              (Number(item.taxPercent ?? 0) / 100),
+                            data.data?.company.currency
+                          )}
+                        </td>
+                        <td className="right">
+                          {money(
+                            Number(item.quantity) *
+                              Number(item.rate ?? 0) *
+                              (1 + Number(item.taxPercent ?? 0) / 100),
                             data.data?.company.currency
                           )}
                         </td>
@@ -294,10 +400,33 @@ export function DocumentPreview({ record, onClose }: Props) {
                 <span>Subtotal</span>
                 <b>{money(doc.subtotal, data.data?.company.currency)}</b>
               </div>
-              <div>
-                <span>Tax</span>
-                <b>{money(doc.taxTotal, data.data?.company.currency)}</b>
-              </div>
+              {isInvoice ? (
+                <>
+                  <div>
+                    <span>CGST</span>
+                    <b>
+                      {money(
+                        Number(doc.taxTotal ?? 0) / 2,
+                        data.data?.company.currency
+                      )}
+                    </b>
+                  </div>
+                  <div>
+                    <span>SGST</span>
+                    <b>
+                      {money(
+                        Number(doc.taxTotal ?? 0) / 2,
+                        data.data?.company.currency
+                      )}
+                    </b>
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <span>Tax</span>
+                  <b>{money(doc.taxTotal, data.data?.company.currency)}</b>
+                </div>
+              )}
               <div>
                 <span>Discount</span>
                 <b>− {money(doc.discount, data.data?.company.currency)}</b>

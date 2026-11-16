@@ -1,6 +1,5 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import nodemailer from "nodemailer";
 import {
   collection,
   getDb,
@@ -16,6 +15,7 @@ import {
   router,
 } from "./_core/trpc";
 import { emailLayout, escapeHtml } from "./emailTemplates";
+import { deliverEmail } from "./emailDelivery";
 
 const dateField = z
   .string()
@@ -102,43 +102,6 @@ async function logActivity(
     },
     session
   );
-}
-async function deliver(to: string, subject: string, html: string) {
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASSWORD;
-  const from = process.env.SMTP_FROM;
-  const port = Number(process.env.SMTP_PORT || "587");
-  if (!host || !user || !pass || !from || !Number.isInteger(port))
-    return {
-      sent: false,
-      reason:
-        "Email delivery is not configured. Add SMTP host, port, username, password, and sender address in project secrets.",
-    };
-  try {
-    const transporter = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-      connectionTimeout: 12000,
-      greetingTimeout: 12000,
-      socketTimeout: 20000,
-    });
-    await transporter.sendMail({ from, to, subject, html });
-    return {
-      sent: true as const,
-      reason: "Message accepted by the mail server.",
-    };
-  } catch (error) {
-    return {
-      sent: false as const,
-      reason:
-        error instanceof Error
-          ? error.message.slice(0, 420)
-          : "Mail server delivery failed.",
-    };
-  }
 }
 async function logNotice(
   companyId: number,
@@ -649,7 +612,7 @@ export const documentsRouter = router({
           : `Your ${documentLabel} ${doc.number} from ${company.name}.`,
         content: `<p>Hello ${escapeHtml(customer.name)},</p><p>${isReminder ? `This is a reminder that <strong>${escapeHtml(company.currency)} ${outstanding.toFixed(2)}</strong> remains due for invoice <strong>${escapeHtml(doc.number)}</strong>.` : `Please find your ${documentLabel} <strong>${escapeHtml(doc.number)}</strong> for <strong>${escapeHtml(company.currency)} ${amount(doc.total).toFixed(2)}</strong>.`}</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:20px 0;width:100%;border:1px solid #e2e8f0;border-radius:6px"><tr><td style="padding:12px;color:#64748b">${isReminder ? "Amount due" : "Total amount"}</td><td align="right" style="padding:12px;font-weight:700">${escapeHtml(company.currency)} ${(isReminder ? outstanding : amount(doc.total)).toFixed(2)}</td></tr><tr><td style="padding:12px;color:#64748b;border-top:1px solid #e2e8f0">Due date</td><td align="right" style="padding:12px;border-top:1px solid #e2e8f0">${escapeHtml(doc.dueDate ?? "Not specified")}</td></tr></table>${doc.notes ? `<p><strong>Notes:</strong><br>${escapeHtml(doc.notes).replace(/\n/g, "<br>")}</p>` : ""}<p>${isReminder ? "Please arrange payment at your earliest convenience. If you have already paid, please disregard this message." : "Thank you for your business."}</p><p>Regards,<br>${escapeHtml(company.name)}</p>`,
       });
-      const result = await deliver(recipient, subject, html);
+      const result = await deliverEmail(recipient, subject, html);
       await logNotice(
         ctx.user.companyId,
         doc.id,
