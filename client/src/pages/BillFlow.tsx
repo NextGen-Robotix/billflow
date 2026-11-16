@@ -2051,7 +2051,7 @@ function SettingsView({
             <span>
               {notices?.some(row => row.log.status === "sent")
                 ? "Connected messages have been recorded."
-                : "No successful sends yet. Configure the SMTP_* project secrets to deliver email."}
+                : "No successful sends yet. Configure the RESEND_* project secrets to deliver email."}
             </span>
           </div>
         </div>

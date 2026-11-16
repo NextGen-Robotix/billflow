@@ -1,6 +1,5 @@
 import { TRPCError } from "@trpc/server";
 import { createHash, randomBytes } from "node:crypto";
-import nodemailer from "nodemailer";
 import { z } from "zod";
 import {
   collection,
@@ -13,6 +12,7 @@ import { storageGet } from "./storage";
 import type { AppUser } from "../shared/models";
 import { adminProcedure, protectedProcedure, router } from "./_core/trpc";
 import { emailLayout, escapeHtml } from "./emailTemplates";
+import { deliverEmail } from "./emailDelivery";
 
 const dateField = z
   .string()
@@ -88,43 +88,6 @@ async function logActivity(
     },
     session
   );
-}
-async function deliver(to: string, subject: string, html: string) {
-  const host = process.env.SMTP_HOST,
-    user = process.env.SMTP_USER,
-    pass = process.env.SMTP_PASSWORD,
-    from = process.env.SMTP_FROM,
-    port = Number(process.env.SMTP_PORT || "587");
-  if (!host || !user || !pass || !from || !Number.isInteger(port))
-    return {
-      sent: false,
-      reason:
-        "Email delivery is not configured. Add SMTP host, port, username, password, and sender address in project secrets.",
-    };
-  try {
-    const transport = nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-      connectionTimeout: 12000,
-      greetingTimeout: 12000,
-      socketTimeout: 20000,
-    });
-    await transport.sendMail({ from, to, subject, html });
-    return {
-      sent: true as const,
-      reason: "Message accepted by the mail server.",
-    };
-  } catch (e) {
-    return {
-      sent: false as const,
-      reason:
-        e instanceof Error
-          ? e.message.slice(0, 420)
-          : "Mail server delivery failed.",
-    };
-  }
 }
 async function logNotice(
   companyId: number,
@@ -489,7 +452,7 @@ export const usersRouter = router({
       }
       const link = new URL("/", origin.origin);
       link.searchParams.set("invite", token);
-      const result = await deliver(
+      const result = await deliverEmail(
         email,
         `Invitation to ${company.name} on BillFlow`,
         emailLayout({
@@ -763,7 +726,7 @@ export async function runBillFlowDailyReminders(companyId?: number) {
       preheader: `Invoice ${doc.number} has an outstanding balance.`,
       content: `<p>Hello ${escapeHtml(customerName)},</p><p>This is a friendly reminder that invoice <strong>${escapeHtml(doc.number)}</strong> has an outstanding balance.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:20px 0;width:100%;border:1px solid #e2e8f0;border-radius:6px"><tr><td style="padding:12px;color:#64748b">Amount due</td><td align="right" style="padding:12px;font-weight:700">${escapeHtml(company.currency ?? "—")} ${outstanding.toFixed(2)}</td></tr><tr><td style="padding:12px;color:#64748b;border-top:1px solid #e2e8f0">Due date</td><td align="right" style="padding:12px;border-top:1px solid #e2e8f0">${escapeHtml(doc.dueDate ?? "Not specified")}</td></tr></table><p>Please arrange payment at your earliest convenience. If you have already paid, please disregard this message.</p><p>Regards,<br>${escapeHtml(company.name)}</p>`,
     });
-    const result = await deliver(
+    const result = await deliverEmail(
       recipient,
       `Invoice ${doc.number} is due`,
       html

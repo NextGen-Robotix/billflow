@@ -30,6 +30,12 @@ export type BillFlowOutput = {
     address?: string | null;
     phone?: string | null;
     gstNumber?: string | null;
+    bankName?: string | null;
+    bankBranch?: string | null;
+    bankAccountName?: string | null;
+    bankAccountNumber?: string | null;
+    bankIfsc?: string | null;
+    upiId?: string | null;
   };
   items: Array<{
     name: string;
@@ -472,6 +478,302 @@ export async function buildBillFlowPdf(data: BillFlowOutput) {
     return y - mm(8);
   }
 
+  if (data.kind === "invoice") {
+    const taxInvoicePage = (await addPage(false)).page;
+    const black = rgb(0.08, 0.08, 0.08);
+    const white = rgb(1, 1, 1);
+    const invoiceMargin = mm(10);
+    const invoiceWidth = pageWidth - invoiceMargin * 2;
+    let invoiceY = pageHeight - mm(12);
+
+    const text = (
+      value: unknown,
+      x: number,
+      y: number,
+      size = 7,
+      font = regular,
+      width?: number
+    ) => {
+      const content = String(value ?? "");
+      if (!content) return;
+      if (width) {
+        drawFittedText(taxInvoicePage, content, x, y, width, font, size, black);
+      } else {
+        taxInvoicePage.drawText(content, { x, y, size, font, color: black });
+      }
+    };
+    const cell = (
+      x: number,
+      y: number,
+      width: number,
+      height: number,
+      value = "",
+      options: { bold?: boolean; align?: "left" | "center" | "right"; size?: number } = {}
+    ) => {
+      taxInvoicePage.drawRectangle({
+        x,
+        y,
+        width,
+        height,
+        borderColor: black,
+        borderWidth: 0.55,
+        color: white,
+      });
+      const font = options.bold ? bold : regular;
+      const size = options.size ?? 6.7;
+      const valueWidth = font.widthOfTextAtSize(value, size);
+      const contentWidth = width - mm(3);
+      const drawX =
+        options.align === "right"
+          ? x + mm(1.5)
+          : options.align === "center"
+            ? x + (width - Math.min(valueWidth, contentWidth)) / 2
+            : x + mm(1.5);
+      drawFittedText(
+        taxInvoicePage,
+        value,
+        drawX,
+        y + height / 2 - size / 3,
+        contentWidth,
+        font,
+        size,
+        black,
+        options.align === "right" ? "right" : "left"
+      );
+    };
+    const columnX = (fractions: number[], index: number) =>
+      invoiceMargin +
+      invoiceWidth * fractions.slice(0, index).reduce((sum, part) => sum + part, 0);
+
+    text("TAX INVOICE", pageWidth / 2 - mm(17), invoiceY, 11, bold);
+    text("Original for Recipient", pageWidth - invoiceMargin - mm(36), invoiceY, 6.5);
+    invoiceY -= mm(4);
+
+    const companyHeight = mm(30);
+    taxInvoicePage.drawRectangle({
+      x: invoiceMargin,
+      y: invoiceY - companyHeight,
+      width: invoiceWidth,
+      height: companyHeight,
+      borderColor: black,
+      borderWidth: 0.7,
+      color: white,
+    });
+    text(data.company.name || "Business", invoiceMargin + mm(3), invoiceY - mm(8), 13, bold);
+    const companyDetails = [
+      data.company.gstNumber ? `GST Number : ${data.company.gstNumber}` : "",
+      data.company.address,
+      data.company.phone ? `Contact Number: ${data.company.phone}` : "",
+    ].filter(Boolean);
+    companyDetails.forEach((value, index) =>
+      text(value, invoiceMargin + mm(3), invoiceY - mm(14 + index * 4), 6.4)
+    );
+    const metadataX = invoiceMargin + invoiceWidth * 0.68;
+    text(`Invoice No : ${data.number}`, metadataX, invoiceY - mm(9), 7);
+    text(`Invoice Date : ${dateLabel(data.date)}`, metadataX, invoiceY - mm(16), 7);
+    invoiceY -= companyHeight;
+
+    const partyHeight = mm(31);
+    const partyWidth = invoiceWidth / 2;
+    const drawParty = (x: number, title: string) => {
+      taxInvoicePage.drawRectangle({
+        x,
+        y: invoiceY - partyHeight,
+        width: partyWidth,
+        height: partyHeight,
+        borderColor: black,
+        borderWidth: 0.55,
+        color: white,
+      });
+      text(title, x + partyWidth / 2 - mm(24), invoiceY - mm(5), 7, bold, mm(48));
+      const customer = data.customer;
+      const lines = [
+        `Name : ${customer?.name || "—"}`,
+        `Address : ${customer?.address || "—"}`,
+        `Contact No : ${customer?.phone || "—"}`,
+        `GST No : ${customer?.taxId || "—"}`,
+      ];
+      lines.forEach((value, index) =>
+        text(value, x + mm(3), invoiceY - mm(12 + index * 4.5), 6.2)
+      );
+    };
+    drawParty(invoiceMargin, "Detail of Receiver (Billed to)");
+    drawParty(invoiceMargin + partyWidth, "Detail of Consignee (Shipped to)");
+    invoiceY -= partyHeight;
+
+    const fractions = [0.055, 0.22, 0.11, 0.095, 0.13, 0.13, 0.065, 0.11, 0.085];
+    const headers = [
+      "No",
+      "Item Name",
+      "HSN Code",
+      "Qty (Unit)",
+      "Rate",
+      "Amount",
+      "GST %",
+      "GST Amount",
+      "Total",
+    ];
+    const headerHeight = mm(13);
+    let x = invoiceMargin;
+    headers.forEach((header, index) => {
+      const width = invoiceWidth * fractions[index];
+      cell(x, invoiceY - headerHeight, width, headerHeight, header, {
+        bold: true,
+        align: "center",
+        size: 6.1,
+      });
+      x += width;
+    });
+    invoiceY -= headerHeight;
+
+    const itemRows = data.items.map((item, index) => {
+      const quantity = num(item.quantity);
+      const rate = num(item.rate);
+      const base = quantity * rate;
+      const tax = base * (num(item.taxPercent) / 100);
+      return {
+        item,
+        index,
+        quantity,
+        rate,
+        base,
+        tax,
+        total: base + tax,
+      };
+    });
+    const rowHeight = mm(10);
+    itemRows.forEach(row => {
+      let itemX = invoiceMargin;
+      const values = [
+        `${row.index + 1}.`,
+        row.item.name,
+        row.item.hsn || "—",
+        `${row.quantity} ${row.item.unit || ""}`.trim(),
+        currency(row.rate, data.company.currency),
+        currency(row.base, data.company.currency),
+        `${num(row.item.taxPercent).toFixed(2)}`,
+        currency(row.tax, data.company.currency),
+        currency(row.total, data.company.currency),
+      ];
+      values.forEach((value, index) => {
+        const width = invoiceWidth * fractions[index];
+        cell(itemX, invoiceY - rowHeight, width, rowHeight, value, {
+          align: index === 1 || index === 2 ? "left" : "right",
+          size: 6.2,
+        });
+        itemX += width;
+      });
+      invoiceY -= rowHeight;
+    });
+
+    const subtotal = itemRows.reduce((sum, row) => sum + row.base, 0);
+    const taxTotal = itemRows.reduce((sum, row) => sum + row.tax, 0);
+    const discount = num(data.discount);
+    const total = Math.max(0, subtotal + taxTotal - discount);
+    const quantityTotal = itemRows.reduce((sum, row) => sum + row.quantity, 0);
+    const subtotalValues = [
+      "Subtotal",
+      `${quantityTotal}`,
+      currency(subtotal, data.company.currency),
+      currency(taxTotal, data.company.currency),
+      currency(total, data.company.currency),
+    ];
+    let subtotalX = invoiceMargin;
+    fractions.forEach((fraction, index) => {
+      const width = invoiceWidth * fraction;
+      const value =
+        index === 1
+          ? subtotalValues[1]
+          : index === 4
+            ? subtotalValues[2]
+            : index === 7
+              ? subtotalValues[3]
+              : index === 8
+                ? subtotalValues[4]
+                : index === 0
+                  ? subtotalValues[0]
+                  : "";
+      cell(subtotalX, invoiceY - rowHeight, width, rowHeight, value, {
+        bold: true,
+        align: index === 0 ? "left" : "right",
+        size: 6.2,
+      });
+      subtotalX += width;
+    });
+    invoiceY -= rowHeight;
+
+    const summaryHeight = mm(38);
+    const summaryLeftWidth = invoiceWidth * 0.58;
+    const summaryRightWidth = invoiceWidth - summaryLeftWidth;
+    const leftLines = [
+      `Total Amount In Word : ${currency(total, data.company.currency)}`,
+      data.company.bankName ? `Bank Name: ${data.company.bankName}` : "",
+      data.company.bankBranch ? `Branch Name: ${data.company.bankBranch}` : "",
+      data.company.bankAccountName
+        ? `Account Name: ${data.company.bankAccountName}`
+        : "",
+      data.company.bankAccountNumber
+        ? `Account Number: ${data.company.bankAccountNumber}`
+        : "",
+      data.company.bankIfsc ? `IFSC Code: ${data.company.bankIfsc}` : "",
+      data.company.upiId ? `UPI ID: ${data.company.upiId}` : "",
+    ].filter(Boolean);
+    taxInvoicePage.drawRectangle({
+      x: invoiceMargin,
+      y: invoiceY - summaryHeight,
+      width: summaryLeftWidth,
+      height: summaryHeight,
+      borderColor: black,
+      borderWidth: 0.55,
+      color: white,
+    });
+    leftLines.forEach((value, index) =>
+      text(value, invoiceMargin + mm(3), invoiceY - mm(6 + index * 4.5), 6.1, index === 0 ? bold : regular)
+    );
+    const summaryRows = [
+      ["Subtotal :", currency(subtotal, data.company.currency)],
+      ["CGST Amount :", currency(taxTotal / 2, data.company.currency)],
+      ["SGST Amount :", currency(taxTotal / 2, data.company.currency)],
+      ["Round Off :", currency(0, data.company.currency)],
+      ["Total :", currency(total, data.company.currency)],
+    ];
+    const summaryRowHeight = summaryHeight / summaryRows.length;
+    summaryRows.forEach((row, index) => {
+      const rowY = invoiceY - summaryRowHeight * (index + 1);
+      cell(invoiceMargin + summaryLeftWidth, rowY, summaryRightWidth * 0.58, summaryRowHeight, row[0], {
+        bold: index === summaryRows.length - 1,
+        size: 6.2,
+      });
+      cell(
+        invoiceMargin + summaryLeftWidth + summaryRightWidth * 0.58,
+        rowY,
+        summaryRightWidth * 0.42,
+        summaryRowHeight,
+        row[1],
+        { bold: index === summaryRows.length - 1, align: "right", size: 6.2 }
+      );
+    });
+    invoiceY -= summaryHeight;
+
+    const footerHeight = mm(20);
+    const footerParts = [
+      ["Notes:", data.notes || "Thank you for your business."],
+      ["Terms and Conditions:", "Goods once sold will not be taken back."],
+      ["", "For, " + (data.company.name || "Business")],
+    ];
+    let footerX = invoiceMargin;
+    footerParts.forEach(([label, value], index) => {
+      const width = invoiceWidth * (index === 2 ? 0.25 : 0.375);
+      cell(footerX, invoiceY - footerHeight, width, footerHeight, "", { size: 6 });
+      text(label, footerX + mm(2), invoiceY - mm(5), 6.1, bold);
+      for (const [lineIndex, line] of wrap(value, width - mm(4), 6, regular).slice(0, 3).entries())
+        text(line, footerX + mm(2), invoiceY - mm(10 + lineIndex * 3.6), 6);
+      footerX += width;
+    });
+    text("Authorized Signatory", invoiceMargin + invoiceWidth * 0.75 + mm(8), invoiceY - mm(16), 6.1, bold);
+    return await pdf.save();
+  }
+
   let cursor = await addPage(true);
   const fractions =
     data.kind === "delivery_challan"
@@ -632,24 +934,9 @@ export async function buildBillFlowPdf(data: BillFlowOutput) {
             `− ${currency(num(data.discount), data.company.currency)}`,
           ],
           [
-            data.kind === "quotation" ? "Quotation total" : "Invoice total",
+            "Quotation total",
             currency(num(data.total), data.company.currency),
           ],
-          ...(data.kind === "invoice" && num(data.amountPaid) > 0
-            ? [
-                [
-                  "Paid to date",
-                  currency(num(data.amountPaid), data.company.currency),
-                ],
-                [
-                  "Balance due",
-                  currency(
-                    Math.max(0, num(data.total) - num(data.amountPaid)),
-                    data.company.currency
-                  ),
-                ],
-              ]
-            : []),
         ];
   for (let index = 0; index < rows.length; index++) {
     if (cursor.y - mm(7) < bottomLimit) cursor = await addPage(false);
